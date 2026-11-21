@@ -1,5 +1,125 @@
-- name: Actualización - Estructura institucional (grupos, áreas, asignaturas, docentes)
+name: Compilar app para Mac
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-latest   # Apple Silicon
+    steps:
+      - name: Crear proyecto (todo el código va en este archivo)
         run: |
+          mkdir -p Sources/HorariosEmergencia
+          cat > Package.swift <<'EOF'
+          // swift-tools-version:5.9
+          import PackageDescription
+
+          let package = Package(
+              name: "HorariosEmergencia",
+              platforms: [.macOS(.v14)],
+              targets: [
+                  .executableTarget(name: "HorariosEmergencia", path: "Sources/HorariosEmergencia")
+              ]
+          )
+          EOF
+          cat > Sources/HorariosEmergencia/HorariosApp.swift <<'EOF'
+          import SwiftUI
+
+          @main
+          struct HorariosApp: App {
+              @StateObject private var store = Store()
+              var body: some Scene {
+                  WindowGroup("Horarios de Emergencia") {
+                      ContentView()
+                          .environmentObject(store)
+                          .frame(minWidth: 1000, minHeight: 640)
+                  }
+              }
+          }
+
+          enum Pantalla: String, CaseIterable, Identifiable {
+              case inicio = "Inicio"
+              case importar = "Importar horarios"
+              case docentes = "Docentes"
+              case horario = "Horario institucional"
+              case config = "Configuración académica"
+              case emergencia = "Ausencias y emergencia"
+              case consultar = "Consultar horarios"
+              case informes = "Informes y exportaciones"
+              case historial = "Historial"
+              case estGrupos = "Configuración de grupos"
+              case estAreas = "Configuración de áreas"
+              case estAsignaturas = "Configuración de asignaturas"
+              case estDocentes = "Configuración de docentes"
+              case asocAsignaturas = "Docentes y asignaturas"
+              case asocGrupos = "Docentes y grupos"
+              var id: String { rawValue }
+              var isEstructura: Bool {
+                  switch self {
+                  case .estGrupos, .estAreas, .estAsignaturas, .estDocentes, .asocAsignaturas, .asocGrupos: return true
+                  default: return false
+                  }
+              }
+              var icon: String {
+                  switch self {
+                  case .inicio: return "house"
+                  case .importar: return "square.and.arrow.down"
+                  case .docentes: return "person.2"
+                  case .horario: return "tablecells"
+                  case .config: return "gearshape"
+                  case .emergencia: return "exclamationmark.triangle"
+                  case .consultar: return "calendar"
+                  case .informes: return "doc.text"
+                  case .historial: return "clock.arrow.circlepath"
+                  case .estGrupos: return "rectangle.3.group"
+                  case .estAreas: return "square.grid.2x2"
+                  case .estAsignaturas: return "books.vertical"
+                  case .estDocentes: return "person.crop.rectangle.stack"
+                  case .asocAsignaturas: return "link"
+                  case .asocGrupos: return "person.3"
+                  }
+              }
+          }
+
+          struct ContentView: View {
+              @State private var sel: Pantalla? = .inicio
+              var body: some View {
+                  NavigationSplitView {
+                      List(selection: $sel) {
+                          Section("Menú principal") {
+                              ForEach(Pantalla.allCases.filter { !$0.isEstructura }) { p in
+                                  Label(p.rawValue, systemImage: p.icon).tag(p)
+                              }
+                          }
+                          Section("Estructura institucional") {
+                              ForEach(Pantalla.allCases.filter { $0.isEstructura }) { p in
+                                  Label(p.rawValue, systemImage: p.icon).tag(p)
+                              }
+                          }
+                      }
+                      .navigationSplitViewColumnWidth(min: 230, ideal: 260)
+                  } detail: {
+                      switch sel ?? .inicio {
+                      case .inicio: InicioView()
+                      case .importar: ImportView()
+                      case .docentes: TeachersView()
+                      case .horario: LessonsView()
+                      case .config: ConfigView()
+                      case .emergencia: EmergencyView()
+                      case .consultar: ConsultView()
+                      case .informes: ReportsView()
+                      case .historial: HistoryView()
+                      case .estGrupos: GroupsConfigView()
+                      case .estAreas: AreasConfigView()
+                      case .estAsignaturas: SubjectsConfigView()
+                      case .estDocentes: TeachersConfigView()
+                      case .asocAsignaturas: AssocView(bySubject: true)
+                      case .asocGrupos: AssocView(bySubject: false)
+                      }
+                  }
+              }
+          }
+          EOF
           cat > Sources/HorariosEmergencia/Models.swift <<'EOF'
           import Foundation
 
@@ -271,104 +391,6 @@
                   && !t.unavailable.contains("\(day)|\(period)")
                   && !data.lessons.contains { $0.day == day && $0.period == period && $0.teacherID == t.id }
                   && !assignments.contains { $0.id != excluding && $0.period == period && $0.coverTeacherID == t.id }
-              }
-          }
-          EOF
-          cat > Sources/HorariosEmergencia/HorariosApp.swift <<'EOF'
-          import SwiftUI
-
-          @main
-          struct HorariosApp: App {
-              @StateObject private var store = Store()
-              var body: some Scene {
-                  WindowGroup("Horarios de Emergencia") {
-                      ContentView()
-                          .environmentObject(store)
-                          .frame(minWidth: 1000, minHeight: 640)
-                  }
-              }
-          }
-
-          enum Pantalla: String, CaseIterable, Identifiable {
-              case inicio = "Inicio"
-              case importar = "Importar horarios"
-              case docentes = "Docentes"
-              case horario = "Horario institucional"
-              case config = "Configuración académica"
-              case emergencia = "Ausencias y emergencia"
-              case consultar = "Consultar horarios"
-              case informes = "Informes y exportaciones"
-              case historial = "Historial"
-              case estGrupos = "Configuración de grupos"
-              case estAreas = "Configuración de áreas"
-              case estAsignaturas = "Configuración de asignaturas"
-              case estDocentes = "Configuración de docentes"
-              case asocAsignaturas = "Docentes y asignaturas"
-              case asocGrupos = "Docentes y grupos"
-              var id: String { rawValue }
-              var isEstructura: Bool {
-                  switch self {
-                  case .estGrupos, .estAreas, .estAsignaturas, .estDocentes, .asocAsignaturas, .asocGrupos: return true
-                  default: return false
-                  }
-              }
-              var icon: String {
-                  switch self {
-                  case .inicio: return "house"
-                  case .importar: return "square.and.arrow.down"
-                  case .docentes: return "person.2"
-                  case .horario: return "tablecells"
-                  case .config: return "gearshape"
-                  case .emergencia: return "exclamationmark.triangle"
-                  case .consultar: return "calendar"
-                  case .informes: return "doc.text"
-                  case .historial: return "clock.arrow.circlepath"
-                  case .estGrupos: return "rectangle.3.group"
-                  case .estAreas: return "square.grid.2x2"
-                  case .estAsignaturas: return "books.vertical"
-                  case .estDocentes: return "person.crop.rectangle.stack"
-                  case .asocAsignaturas: return "link"
-                  case .asocGrupos: return "person.3"
-                  }
-              }
-          }
-
-          struct ContentView: View {
-              @State private var sel: Pantalla? = .inicio
-              var body: some View {
-                  NavigationSplitView {
-                      List(selection: $sel) {
-                          Section("Menú principal") {
-                              ForEach(Pantalla.allCases.filter { !$0.isEstructura }) { p in
-                                  Label(p.rawValue, systemImage: p.icon).tag(p)
-                              }
-                          }
-                          Section("Estructura institucional") {
-                              ForEach(Pantalla.allCases.filter { $0.isEstructura }) { p in
-                                  Label(p.rawValue, systemImage: p.icon).tag(p)
-                              }
-                          }
-                      }
-                      .navigationSplitViewColumnWidth(min: 230, ideal: 260)
-                  } detail: {
-                      switch sel ?? .inicio {
-                      case .inicio: InicioView()
-                      case .importar: ImportView()
-                      case .docentes: TeachersView()
-                      case .horario: LessonsView()
-                      case .config: ConfigView()
-                      case .emergencia: EmergencyView()
-                      case .consultar: ConsultView()
-                      case .informes: ReportsView()
-                      case .historial: HistoryView()
-                      case .estGrupos: GroupsConfigView()
-                      case .estAreas: AreasConfigView()
-                      case .estAsignaturas: SubjectsConfigView()
-                      case .estDocentes: TeachersConfigView()
-                      case .asocAsignaturas: AssocView(bySubject: true)
-                      case .asocGrupos: AssocView(bySubject: false)
-                      }
-                  }
               }
           }
           EOF
@@ -1155,43 +1177,795 @@
               }
           }
           EOF
-          cat > patch_estructura.py <<'EOF'
-          import re, sys
-          def sub(path, pat, rep, flags=0, lit=False):
-              s = open(path, encoding="utf-8").read()
-              if lit:
-                  if pat not in s: sys.exit("PATCH FALLO en %s: %s" % (path, pat[:60]))
-                  s = s.replace(pat, rep, 1)
-              else:
-                  s, n = re.subn(pat, rep if callable(rep) else (lambda m: rep), s, count=1, flags=flags)
-                  if n == 0: sys.exit("PATCH FALLO en %s: %s" % (path, pat[:60]))
-              open(path, "w", encoding="utf-8").write(s)
+          cat > Sources/HorariosEmergencia/Reports.swift <<'EOF'
+          import SwiftUI
+          import AppKit
 
-          V1 = "Sources/HorariosEmergencia/Views1.swift"
-          V2 = "Sources/HorariosEmergencia/Views2.swift"
-          # 1) Horario institucional antiguo -> reemplazado por Lessons.swift
-          sub(V1, r"struct LessonsView: View \{.*?(?=struct ConfigView: View)", "", re.S)
-          # 2) Importacion: no borrar docentes registrados, integrar estructura, alertar sobre lo nuevo
-          sub(V1, '@State private var msg = ""',
-              '@State private var msg = ""\n'
-              '    @State private var showNew = false\n'
-              '    var missingText: String { missingSummary(store.data, lessons) }\n'
-              '    func askConfirm() { if missingSummary(store.data, lessons).isEmpty { confirm() } else { showNew = true } }', lit=True)
-          sub(V1, 'Button("Confirmar e importar") { confirm() }', 'Button("Confirmar e importar") { askConfirm() }', lit=True)
-          sub(V1, '.fileImporter(isPresented: $picking',
-              '.alert("Registros no encontrados en la estructura", isPresented: $showNew) {\n'
-              '                  Button("Crear registros e importar") { confirm() }\n'
-              '                  Button("Cancelar", role: .cancel) {}\n'
-              '              } message: { Text(missingText) }\n'
-              '              .fileImporter(isPresented: $picking', lit=True)
-          sub(V1, 'd.teachers = newTeachers',
-              'for t in newTeachers { if let i = d.teachers.firstIndex(where: { $0.id == t.id }) { d.teachers[i] = t } else { d.teachers.append(t) } }', lit=True)
-          sub(V1, r'store\.data = d\n(\s+)msg = "Importado',
-              lambda m: 'syncStructure(&d)\n' + m.group(1) + 'store.data = d\n' + m.group(1) + 'msg = "Importado')
-          sub(V1, r'store\.data = d\n(\s+)return "',
-              lambda m: 'syncStructure(&d)\n' + m.group(1) + 'store.data = d\n' + m.group(1) + 'return "')
-          # 3) Ausencias: solo docentes activos
-          sub(V2, 'List(store.data.teachers, selection: $absent)', 'List(store.data.teachers.filter(\\.active), selection: $absent)', lit=True)
-          print("Parches aplicados")
+          struct ReportRow: Identifiable {
+              let id = UUID()
+              let period: String, group: String, subject: String, absent: String, cover: String
+          }
+
+          struct ReportView: View {
+              let title: String
+              let subtitle: String
+              let rows: [ReportRow]
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 8) {
+                      Text(title).font(.title2.bold())
+                      Text(subtitle).font(.subheadline)
+                      Divider()
+                      ForEach(rows) { r in
+                          HStack {
+                              Text(r.period).frame(width: 110, alignment: .leading)
+                              Text(r.group).frame(width: 60, alignment: .leading)
+                              Text(r.subject).frame(width: 150, alignment: .leading)
+                              Text(r.absent).frame(width: 170, alignment: .leading)
+                              Text(r.cover).frame(width: 170, alignment: .leading)
+                          }.font(.caption)
+                      }
+                  }
+                  .padding(32)
+                  .frame(width: 760, alignment: .topLeading)
+                  .background(Color.white)
+                  .foregroundColor(.black)
+              }
+          }
+
+          @MainActor
+          func renderPDF<V: View>(_ view: V, to url: URL) {
+              let r = ImageRenderer(content: view)
+              r.render { size, draw in
+                  var box = CGRect(origin: .zero, size: size)
+                  guard let ctx = CGContext(url as CFURL, mediaBox: &box, nil) else { return }
+                  ctx.beginPDFPage(nil)
+                  draw(ctx)
+                  ctx.endPDFPage()
+                  ctx.closePDF()
+              }
+          }
+
+          func savePanel(_ name: String) -> URL? {
+              let p = NSSavePanel()
+              p.nameFieldStringValue = name
+              return p.runModal() == .OK ? p.url : nil
+          }
+
+          func csvLine(_ cols: [String]) -> String {
+              cols.map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: ",")
+          }
+
+          func writeCSV(_ lines: [String], to url: URL) {
+              let text = "\u{FEFF}" + lines.joined(separator: "\n")
+              try? text.data(using: .utf8)?.write(to: url)
+          }
+
+          struct ReportsView: View {
+              @EnvironmentObject var store: Store
+              @State private var recID: UUID?
+              @State private var kind = 0       // 0 general, 1 docente, 2 grupo
+              @State private var teacher: UUID?
+              @State private var group = ""
+
+              var record: EmergencyRecord? { store.data.history.first { $0.id == recID } ?? store.data.history.first }
+
+              func rows() -> [ReportRow] {
+                  guard let r = record else { return [] }
+                  var list = r.assignments
+                  if kind == 1 { list = list.filter { $0.coverTeacherID == teacher || $0.absentTeacherID == teacher } }
+                  if kind == 2 { list = list.filter { $0.group == group } }
+                  return list.sorted { $0.period < $1.period }.map { a in
+                      ReportRow(period: "P\(a.period) " + (store.data.periods.first { $0.id == a.period }?.time ?? ""),
+                                group: a.group, subject: a.subject,
+                                absent: store.name(a.absentTeacherID),
+                                cover: a.coverTeacherID == nil ? "SIN COBERTURA" : store.name(a.coverTeacherID))
+                  }
+              }
+
+              var subtitle: String {
+                  guard let r = record else { return "" }
+                  return "Fecha: \(r.date.formatted(date: .long, time: .omitted)) · Jornada AM · Novedades, ausentes: "
+                      + r.absentIDs.map { store.name($0) }.joined(separator: ", ")
+              }
+
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 12) {
+                      Text("Informes y exportaciones").font(.title.bold())
+                      if store.data.history.isEmpty {
+                          Text("Aún no hay emergencias aprobadas. Genere y apruebe una en «Ausencias y emergencia».")
+                              .foregroundStyle(.secondary)
+                      } else {
+                          Picker("Emergencia", selection: $recID) {
+                              ForEach(store.data.history) {
+                                  Text($0.date.formatted(date: .abbreviated, time: .omitted)).tag(Optional($0.id))
+                              }
+                          }.frame(width: 320)
+                          Picker("", selection: $kind) {
+                              Text("General de la jornada").tag(0)
+                              Text("Por docente").tag(1)
+                              Text("Por grupo").tag(2)
+                          }.pickerStyle(.segmented).frame(width: 420)
+                          if kind == 1 {
+                              Picker("Docente", selection: $teacher) {
+                                  Text("—").tag(UUID?.none)
+                                  ForEach(store.data.teachers) { Text($0.name).tag(Optional($0.id)) }
+                              }.frame(width: 320)
+                          }
+                          if kind == 2 {
+                              Picker("Grupo", selection: $group) {
+                                  ForEach(store.groups, id: \.self) { Text($0).tag($0) }
+                              }.frame(width: 260)
+                          }
+                          HStack {
+                              Button("Exportar PDF…") {
+                                  if let u = savePanel("Informe-emergencia.pdf") {
+                                      renderPDF(ReportView(title: "Horarios de emergencia", subtitle: subtitle, rows: rows()), to: u)
+                                  }
+                              }
+                              Button("Exportar Excel (CSV)…") {
+                                  if let u = savePanel("Programacion-emergencia.csv") {
+                                      writeCSV([csvLine(["Período", "Grupo", "Asignatura", "Docente ausente", "Docente asignado"])]
+                                               + rows().map { csvLine([$0.period, $0.group, $0.subject, $0.absent, $0.cover]) }, to: u)
+                                  }
+                              }
+                          }
+                      }
+                      Divider()
+                      Button("Exportar horario institucional completo (CSV)…") {
+                          if let u = savePanel("Horario-institucional.csv") {
+                              writeCSV([csvLine(["Docente", "Grupo", "Asignatura", "Día", "Período"])]
+                                       + store.data.lessons.map { csvLine([store.name($0.teacherID), $0.group, $0.subject, dayNames[$0.day], "\($0.period)"]) }, to: u)
+                          }
+                      }
+                  }
+                  .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+              }
+          }
           EOF
-          python3 patch_estructura.py
+          cat > Sources/HorariosEmergencia/Views1.swift <<'EOF'
+          import SwiftUI
+          import AppKit
+          import PDFKit
+          import UniformTypeIdentifiers
+
+          // MARK: - Pantallas básicas
+
+          struct InicioView: View {
+              @EnvironmentObject var store: Store
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 10) {
+                      Text("Horarios de Emergencia").font(.largeTitle.bold())
+                      Text("Gestión de cobertura docente").foregroundStyle(.secondary)
+                      Divider()
+                      Text("Docentes: \(store.data.teachers.count)")
+                      Text("Grupos: \(store.groups.count)")
+                      Text("Clases cargadas: \(store.data.lessons.count)")
+                      Text("Emergencias registradas: \(store.data.history.count)")
+                      Text("Datos locales: ~/Library/Application Support/HorariosEmergencia")
+                          .font(.caption).foregroundStyle(.secondary)
+                  }
+                  .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+              }
+          }
+
+          // MARK: - Lector de PDF (horarios generados por aSc Horarios)
+
+          struct Tok {
+              var text: String
+              var x0: CGFloat
+              var x1: CGFloat
+              var midTop: CGFloat   // distancia desde el borde superior de la página
+              var h: CGFloat
+              var cx: CGFloat { (x0 + x1) / 2 }
+          }
+
+          struct PDFGrid {
+              var cx: [CGFloat]          // centro de cada columna (período)
+              var ids: [Int]             // número de período de cada columna
+              var colW: CGFloat
+              var left: CGFloat          // borde izquierdo de la primera columna
+              var rows: [Int: CGFloat]   // centro de cada fila (0 = lunes ... 4 = viernes)
+              var s: CGFloat             // alto de una fila
+              func row(_ t: Tok) -> Int? {
+                  guard t.cx > left else { return nil }
+                  for (d, y) in rows where abs(t.midTop - y) <= s / 2 { return d }
+                  return nil
+              }
+          }
+
+          struct PLesson { var teacher: String; var group: String; var subject: String; var day: Int; var period: Int }
+          struct StudentMark: Hashable { var group: String; var day: Int; var period: Int }
+          struct PDFImportResult {
+              var lessons: [PLesson] = []
+              var marks = Set<StudentMark>()
+              var warnings: [String] = []
+          }
+
+          func isGroup(_ s: String) -> Bool {
+              s.range(of: #"^\d{1,2}\s?-\s?\d{1,2}$"#, options: .regularExpression) != nil
+          }
+
+          /// Agrupa los caracteres de la página en textos sueltos con su posición.
+          func pdfTokens(_ page: PDFPage) -> [Tok] {
+              guard let s = page.string else { return [] }
+              let ns = s as NSString
+              let pageTop = page.bounds(for: .mediaBox).maxY
+              struct E { var ch: String; var x0: CGFloat; var x1: CGFloat; var y: CGFloat; var h: CGFloat }
+              var ents: [E] = []
+              for i in 0..<min(ns.length, page.numberOfCharacters) {
+                  guard let sc = Unicode.Scalar(ns.character(at: i)),
+                        !CharacterSet.whitespacesAndNewlines.contains(sc) else { continue }
+                  let r = page.characterBounds(at: i)
+                  if r.width <= 0 || r.height <= 0 { continue }
+                  ents.append(E(ch: String(Character(sc)), x0: r.minX, x1: r.maxX, y: pageTop - r.midY, h: r.height))
+              }
+              ents.sort { $0.y < $1.y }
+              var lines: [(ref: CGFloat, items: [E])] = []
+              for e in ents {
+                  if let last = lines.last, abs(e.y - last.ref) <= max(2, 0.35 * e.h) {
+                      lines[lines.count - 1].items.append(e)
+                  } else {
+                      lines.append((ref: e.y, items: [e]))
+                  }
+              }
+              var toks: [Tok] = []
+              func flush(_ run: [E]) {
+                  var t = ""
+                  for (i, e) in run.enumerated() {
+                      if i > 0 && e.x0 - run[i - 1].x1 > 0.15 * e.h { t += " " }
+                      t += e.ch
+                  }
+                  let mid = run.map { $0.y }.reduce(0, +) / CGFloat(run.count)
+                  toks.append(Tok(text: t, x0: run[0].x0, x1: run[run.count - 1].x1,
+                                  midTop: mid, h: run.map { $0.h }.max() ?? 0))
+              }
+              for l in lines {
+                  let L = l.items.sorted { $0.x0 < $1.x0 }
+                  var run = [L[0]]
+                  for e in L.dropFirst() {
+                      if e.x0 - run[run.count - 1].x1 > 0.6 * e.h { flush(run); run = [e] } else { run.append(e) }
+                  }
+                  flush(run)
+              }
+              return toks
+          }
+
+          func makeGrid(_ toks: [Tok]) -> PDFGrid? {
+              let digs = toks.filter { $0.text.count == 1 && Int($0.text) != nil }
+              guard let top = digs.map({ $0.midTop }).min() else { return nil }
+              let hdr = digs.filter { abs($0.midTop - top) < 3 }.sorted { $0.x0 < $1.x0 }
+              guard hdr.count >= 2 else { return nil }
+              let cx = hdr.map { $0.cx }
+              let ids = hdr.map { Int($0.text) ?? 0 }
+              let colW = (cx[cx.count - 1] - cx[0]) / CGFloat(cx.count - 1)
+              let left = cx[0] - colW / 2
+              let keys = ["lu", "ma", "mi", "ju", "vi"]
+              var rows: [Int: CGFloat] = [:]
+              for t in toks where t.cx < left {
+                  if let k = keys.firstIndex(of: String(t.text.lowercased().prefix(2))) { rows[k] = t.midTop }
+              }
+              guard rows.count >= 2, let lo = rows.keys.min(), let hi = rows.keys.max(),
+                    let yLo = rows[lo], let yHi = rows[hi] else { return nil }
+              return PDFGrid(cx: cx, ids: ids, colW: colW, left: left, rows: rows, s: (yHi - yLo) / CGFloat(hi - lo))
+          }
+
+          func norm(_ s: String) -> String { s.precomposedStringWithCanonicalMapping.uppercased() }
+
+          /// PDF "DOCENTES": una página por profesor. Cada casilla trae grupo (centrado) y asignatura
+          /// (alineada a la izquierda). Las casillas anchas son bloques de 2 o 3 períodos seguidos.
+          func parseTeachersPDF(_ doc: PDFDocument, _ r: inout PDFImportResult) {
+              for pi in 0..<doc.pageCount {
+                  guard let page = doc.page(at: pi) else { continue }
+                  let toks = pdfTokens(page)
+                  guard let g = makeGrid(toks), let title = toks.min(by: { $0.midTop < $1.midTop }) else {
+                      r.warnings.append("Docentes, página \(pi + 1): no se reconoció la tabla.")
+                      continue
+                  }
+                  var name = title.text
+                  if name.lowercased().hasPrefix("profesor") {
+                      name = String(name.dropFirst(8)).trimmingCharacters(in: .whitespaces)
+                  }
+                  name = name.precomposedStringWithCanonicalMapping
+                  for d in 0..<5 {
+                      let rt = toks.filter { g.row($0) == d }
+                      let groups = rt.filter { isGroup($0.text) }.sorted { $0.x0 < $1.x0 }
+                      var subs = rt.filter { !isGroup($0.text) }
+                      for gt in groups {
+                          let c = gt.cx
+                          var best: Int? = nil
+                          for (i, t) in subs.enumerated() where t.x0 <= c {
+                              if best == nil || t.x0 > subs[best!].x0 { best = i }
+                          }
+                          guard let b = best else {
+                              r.warnings.append("\(name), \(dayNames[d]): grupo \(gt.text) sin asignatura.")
+                              continue
+                          }
+                          let sub = subs.remove(at: b)
+                          let st = max(0, Int(floor((sub.x0 - g.left) / g.colW)))
+                          let span = max(1, Int((2 * (c - (g.left + CGFloat(st) * g.colW)) / g.colW).rounded()))
+                          for k in 0..<span where st + k < g.ids.count {
+                              r.lessons.append(PLesson(teacher: name,
+                                                       group: gt.text.replacingOccurrences(of: " ", with: ""),
+                                                       subject: norm(sub.text), day: d, period: g.ids[st + k]))
+                          }
+                      }
+                  }
+              }
+          }
+
+          /// PDF "ESTUDIANTES": una página por grupo. Cada clase trae el nombre del docente en letra
+          /// pequeña, alineado a la derecha de la casilla: sirve para verificar contra el de docentes.
+          func parseStudentsPDF(_ doc: PDFDocument, _ r: inout PDFImportResult) {
+              for pi in 0..<doc.pageCount {
+                  guard let page = doc.page(at: pi) else { continue }
+                  let toks = pdfTokens(page)
+                  guard let g = makeGrid(toks), let title = toks.min(by: { $0.midTop < $1.midTop }) else {
+                      r.warnings.append("Estudiantes, página \(pi + 1): no se reconoció la tabla.")
+                      continue
+                  }
+                  let group = title.text.replacingOccurrences(of: " ", with: "")
+                  guard isGroup(group) else {
+                      r.warnings.append("Estudiantes, página \(pi + 1): grupo no reconocido («\(title.text)»).")
+                      continue
+                  }
+                  let rt = toks.filter { g.row($0) != nil }
+                  let maxH = rt.map { $0.h }.max() ?? 0
+                  for t in rt where t.h < maxH * 0.6 {
+                      guard let d = g.row(t) else { continue }
+                      let k = min(max(Int(floor((t.x1 - g.left) / g.colW)), 0), g.ids.count - 1)
+                      r.marks.insert(StudentMark(group: group, day: d, period: g.ids[k]))
+                  }
+              }
+          }
+
+          func areaOf(_ subject: String) -> String {
+              switch subject {
+              case "MATEMATICAS": return "Matemáticas"
+              case "NATURALES", "QUIMICA": return "Ciencias naturales"
+              case "ESPAÑOL", "INGLES": return "Lenguas"
+              case "SOCIALES", "FILOSOFIA", "ETICA", "RELIGION": return "Ciencias sociales y humanidades"
+              case "ARTISTICA", "EDUFISICA": return "Arte y deporte"
+              case "TECNOLOGIA", "EMPRENDIMIENTO": return "Tecnología y emprendimiento"
+              default: return ""
+              }
+          }
+
+          struct TSum: Identifiable { var id: String; var count: Int; var area: String }
+
+          struct ImportView: View {
+              @EnvironmentObject var store: Store
+              @State private var picking = false
+              @State private var mode = 0   // 0 docentes, 1 estudiantes, 2 CSV
+              @State private var tFile = ""
+              @State private var sFile = ""
+              @State private var lessons: [PLesson] = []
+              @State private var marks = Set<StudentMark>()
+              @State private var warnings: [String] = []
+              @State private var msg = ""
+              @State private var showNew = false
+
+              var missingText: String { missingSummary(store.data, lessons) }
+              func askConfirm() {
+                  if missingSummary(store.data, lessons).isEmpty { confirm() } else { showNew = true }
+              }
+
+              var summary: [TSum] {
+                  Dictionary(grouping: lessons, by: { $0.teacher }).map { (name, ls) -> TSum in
+                      let areas = ls.map { areaOf($0.subject) }.filter { !$0.isEmpty }
+                      let top = Dictionary(grouping: areas, by: { $0 }).max { $0.value.count < $1.value.count }?.key ?? ""
+                      return TSum(id: name, count: ls.count, area: top)
+                  }.sorted { $0.id < $1.id }
+              }
+
+              var discrepancies: [String] {
+                  guard !marks.isEmpty, !lessons.isEmpty else { return [] }
+                  var out: [String] = []
+                  let t = Set(lessons.map { StudentMark(group: $0.group, day: $0.day, period: $0.period) })
+                  for m in marks.sorted(by: { ($0.group, $0.day, $0.period) < ($1.group, $1.day, $1.period) }) where !t.contains(m) {
+                      out.append("Solo en estudiantes: \(m.group) \(dayNames[m.day]) período \(m.period)")
+                  }
+                  for m in t.sorted(by: { ($0.group, $0.day, $0.period) < ($1.group, $1.day, $1.period) }) {
+                      let covered = (0...2).contains { off in
+                          marks.contains(StudentMark(group: m.group, day: m.day, period: m.period + off))
+                      }
+                      if !covered { out.append("Solo en docentes: \(m.group) \(dayNames[m.day]) período \(m.period)") }
+                  }
+                  return out
+              }
+
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 10) {
+                      Text("Importar horarios").font(.title.bold())
+                      HStack {
+                          Button("1. PDF de docentes…") { mode = 0; picking = true }
+                          Button("2. PDF de estudiantes…") { mode = 1; picking = true }
+                          Button("CSV de clases…") { mode = 2; picking = true }
+                      }
+                      Text("Casillas vacías en docentes = horas libres · en estudiantes = día sin clase del grupo.")
+                          .font(.caption).foregroundStyle(.secondary)
+                      if !tFile.isEmpty {
+                          Text("Docentes: \(tFile) → \(summary.count) docentes, \(lessons.count) períodos de clase")
+                      }
+                      if !sFile.isEmpty { Text("Estudiantes: \(sFile) → \(marks.count) clases leídas") }
+                      if !tFile.isEmpty && !sFile.isEmpty {
+                          Text(discrepancies.isEmpty ? "Verificación cruzada: los dos PDF coinciden."
+                                                     : "Verificación cruzada: \(discrepancies.count) diferencias (revise abajo).")
+                              .foregroundStyle(discrepancies.isEmpty ? Color.green : Color.orange)
+                      }
+                      if !msg.isEmpty { Text(msg).foregroundStyle(.blue) }
+                      List {
+                          if !warnings.isEmpty || !discrepancies.isEmpty {
+                              Section("Avisos") {
+                                  ForEach(Array((warnings + discrepancies).prefix(40)), id: \.self) { Text($0).font(.caption) }
+                              }
+                          }
+                          Section("Docentes detectados") {
+                              ForEach(summary) { s in
+                                  HStack { Text(s.id); Spacer(); Text("\(s.count) períodos"); Text(s.area).foregroundStyle(.secondary) }
+                              }
+                          }
+                      }
+                      HStack {
+                          Button("Confirmar e importar") { askConfirm() }
+                              .disabled(lessons.isEmpty)
+                              .keyboardShortcut(.defaultAction)
+                          Text("Reemplaza el horario institucional; conserva docentes y configuración existentes.")
+                              .font(.caption).foregroundStyle(.secondary)
+                      }
+                  }
+                  .padding(24)
+                  .alert("Registros no encontrados en la estructura", isPresented: $showNew) {
+                      Button("Crear registros e importar") { confirm() }
+                      Button("Cancelar", role: .cancel) {}
+                  } message: { Text(missingText) }
+                  .fileImporter(isPresented: $picking, allowedContentTypes: [.pdf, .commaSeparatedText, .plainText]) { result in
+                      switch result {
+                      case .success(let url):
+                          let ok = url.startAccessingSecurityScopedResource()
+                          defer { if ok { url.stopAccessingSecurityScopedResource() } }
+                          load(url)
+                      case .failure(let e):
+                          msg = e.localizedDescription
+                      }
+                  }
+              }
+
+              func load(_ url: URL) {
+                  msg = ""
+                  if mode == 2 {
+                      let txt = (try? String(contentsOf: url, encoding: .utf8))
+                          ?? (try? String(contentsOf: url, encoding: .isoLatin1)) ?? ""
+                      msg = importCSV(txt)
+                      return
+                  }
+                  guard let doc = PDFDocument(url: url) else { msg = "No se pudo abrir el PDF."; return }
+                  var r = PDFImportResult()
+                  if mode == 0 {
+                      parseTeachersPDF(doc, &r)
+                      lessons = r.lessons
+                      tFile = url.lastPathComponent
+                      if r.lessons.isEmpty { msg = "No se encontraron clases. ¿Es el PDF de docentes?" }
+                  } else {
+                      parseStudentsPDF(doc, &r)
+                      marks = r.marks
+                      sFile = url.lastPathComponent
+                      if r.marks.isEmpty { msg = "No se encontraron clases. ¿Es el PDF de estudiantes?" }
+                  }
+                  warnings.removeAll { $0.hasPrefix(mode == 0 ? "Docentes" : "Estudiantes") }
+                  warnings += r.warnings
+              }
+
+              func confirm() {
+                  var d = store.data
+                  var ids: [String: UUID] = [:]
+                  var newTeachers: [Teacher] = []
+                  for s in summary {
+                      if var ex = d.teachers.first(where: { $0.name.lowercased() == s.id.lowercased() }) {
+                          if ex.area.isEmpty { ex.area = s.area }
+                          ids[s.id] = ex.id
+                          newTeachers.append(ex)
+                      } else {
+                          let t = Teacher(name: s.id, area: s.area)
+                          ids[s.id] = t.id
+                          newTeachers.append(t)
+                      }
+                  }
+                  // Se conservan los docentes ya registrados; solo se actualizan o agregan los del PDF.
+                  for t in newTeachers {
+                      if let i = d.teachers.firstIndex(where: { $0.id == t.id }) { d.teachers[i] = t } else { d.teachers.append(t) }
+                  }
+                  d.lessons = lessons.compactMap { l in
+                      guard let id = ids[l.teacher] else { return nil }
+                      return Lesson(group: l.group, day: l.day, period: l.period, subject: l.subject, teacherID: id)
+                  }
+                  syncStructure(&d)   // enlaza con grupos, asignaturas y áreas registrados sin duplicar
+                  store.data = d
+                  msg = "Importado: \(d.teachers.count) docentes y \(d.lessons.count) períodos de clase."
+              }
+
+              func importCSV(_ text: String) -> String {
+                  var d = store.data
+                  var n = 0
+                  for raw in text.split(whereSeparator: \.isNewline) {
+                      let cols = raw.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "," || $0 == ";" })
+                          .map { $0.trimmingCharacters(in: .whitespaces) }
+                      guard cols.count >= 5 else { continue }
+                      let day = Int(cols[3]).map { $0 - 1 }
+                          ?? (dayNames.firstIndex { $0.lowercased() == cols[3].lowercased() } ?? -1)
+                      guard let per = Int(cols[4]), (0..<5).contains(day), per >= 1 else { continue }
+                      var tid = d.teachers.first { $0.name.lowercased() == cols[0].lowercased() }?.id
+                      if tid == nil {
+                          let t = Teacher(name: cols[0])
+                          d.teachers.append(t)
+                          tid = t.id
+                      }
+                      d.lessons.append(Lesson(group: cols[1], day: day, period: per, subject: cols[2], teacherID: tid!))
+                      n += 1
+                  }
+                  syncStructure(&d)
+                  store.data = d
+                  return "\(n) clases importadas."
+              }
+          }
+
+          // MARK: - Docentes (vista rápida) y configuración
+
+          struct TeachersView: View {
+              @EnvironmentObject var store: Store
+              var body: some View {
+                  VStack(alignment: .leading) {
+                      HStack {
+                          Text("Docentes").font(.title.bold())
+                          Spacer()
+                          Button("Agregar docente") { store.data.teachers.append(Teacher(name: "Nuevo docente")) }
+                      }
+                      List {
+                          ForEach($store.data.teachers) { $t in
+                              HStack {
+                                  TextField("Nombre", text: $t.name)
+                                  TextField("Área de conocimiento", text: $t.area)
+                                  Text(subjects(t.id)).foregroundStyle(.secondary).lineLimit(1)
+                              }
+                          }
+                          .onDelete { offsets in
+                              let ids = offsets.map { store.data.teachers[$0].id }
+                              store.data.lessons.removeAll { ids.contains($0.teacherID) }
+                              store.data.teachers.remove(atOffsets: offsets)
+                          }
+                      }
+                  }
+                  .padding(24)
+              }
+              func subjects(_ id: UUID) -> String {
+                  Array(Set(store.data.lessons.filter { $0.teacherID == id }.map(\.subject))).sorted().joined(separator: ", ")
+              }
+          }
+
+          struct ConfigView: View {
+              @EnvironmentObject var store: Store
+              var body: some View {
+                  Form {
+                      Text("Configuración académica").font(.title.bold())
+                      Text("Jornada: AM · Días: \(dayNames.joined(separator: ", "))")
+                      ForEach($store.data.periods) { $p in
+                          HStack { Text("Período \(p.id)").frame(width: 90, alignment: .leading); TextField("Horario", text: $p.time) }
+                      }
+                      TextField("Descanso", text: $store.data.breakTime)
+                      HStack {
+                          Button("Agregar período") {
+                              store.data.periods.append(PeriodInfo(id: store.data.periods.count + 1, time: ""))
+                          }
+                          Button("Quitar último") {
+                              if store.data.periods.count > 1 { store.data.periods.removeLast() }
+                          }
+                      }
+                  }
+                  .padding(24).frame(maxWidth: 520, maxHeight: .infinity, alignment: .topLeading)
+              }
+          }
+          EOF
+          cat > Sources/HorariosEmergencia/Views2.swift <<'EOF'
+          import SwiftUI
+          import AppKit
+
+          struct EmergencyView: View {
+              @EnvironmentObject var store: Store
+              @State private var date = Date()
+              @State private var absent = Set<UUID>()
+              @State private var plans: [Plan] = []
+              @State private var planIdx = 0
+              @State private var current: [Assignment] = []
+              @State private var saved = false
+
+              var day: Int { (Calendar.current.component(.weekday, from: date) + 5) % 7 }
+              var affected: [Lesson] { store.data.lessons.filter { $0.day == day && absent.contains($0.teacherID) } }
+
+              var body: some View {
+                  HStack(alignment: .top, spacing: 16) {
+                      VStack(alignment: .leading, spacing: 8) {
+                          Text("Ausencias").font(.title.bold())
+                          DatePicker("Fecha", selection: $date, displayedComponents: .date)
+                          Text("Jornada: AM").foregroundStyle(.secondary)
+                          Text("Docentes ausentes (selección múltiple)").font(.headline)
+                          List(store.data.teachers.filter(\.active), selection: $absent) { Text($0.name) }
+                          if day > 4 { Text("Esa fecha es fin de semana.").foregroundStyle(.red) }
+                          Text("Clases sin docente: \(affected.count)")
+                          Button("Generar alternativas") { generate() }
+                              .disabled(day > 4 || absent.isEmpty)
+                      }
+                      .frame(width: 300)
+
+                      VStack(alignment: .leading, spacing: 8) {
+                          if plans.isEmpty {
+                              Text("Marque los docentes ausentes y genere alternativas.").foregroundStyle(.secondary)
+                          } else {
+                              Picker("Alternativa", selection: $planIdx) {
+                                  ForEach(plans.indices, id: \.self) { i in
+                                      Text("\(plans[i].strategy.rawValue) · sin cubrir: \(plans[i].uncovered)").tag(i)
+                                  }
+                              }
+                              .pickerStyle(.segmented)
+                              Text("Naranja = cobertura de emergencia · Rojo = sin cobertura. Puede cambiar cada docente.")
+                                  .font(.caption).foregroundStyle(.secondary)
+                              List {
+                                  ForEach($current) { $a in
+                                      HStack {
+                                          Text("P\(a.period)").bold().frame(width: 36)
+                                          Text(a.group).frame(width: 70, alignment: .leading)
+                                          Text(a.subject).frame(maxWidth: .infinity, alignment: .leading)
+                                          Text("Ausente: \(store.name(a.absentTeacherID))").foregroundStyle(.secondary)
+                                          Picker("", selection: $a.coverTeacherID) {
+                                              Text("Sin cobertura").tag(UUID?.none)
+                                              ForEach(availableTeachers(store.data, day: day, period: a.period, absent: absent,
+                                                                        assignments: current, excluding: a.id)) {
+                                                  Text($0.name).tag(Optional($0.id))
+                                              }
+                                          }
+                                          .frame(width: 200)
+                                      }
+                                      .listRowBackground(a.coverTeacherID == nil ? Color.red.opacity(0.15) : Color.orange.opacity(0.12))
+                                  }
+                              }
+                              HStack {
+                                  Button("Aprobar y guardar en historial") {
+                                      store.data.history.insert(
+                                          EmergencyRecord(date: date, day: day, absentIDs: Array(absent), assignments: current), at: 0)
+                                      saved = true
+                                  }
+                                  if saved { Text("Guardado en el historial.").foregroundStyle(.green) }
+                              }
+                          }
+                      }
+                  }
+                  .padding(24)
+                  .onChange(of: planIdx) {
+                      if plans.indices.contains(planIdx) { current = plans[planIdx].assignments }
+                  }
+                  .onChange(of: absent) { plans = []; current = []; saved = false }
+                  .onChange(of: date) { plans = []; current = []; saved = false }
+              }
+
+              func generate() {
+                  var p = Strategy.allCases.map { Plan(strategy: $0, assignments: solve(store.data, day: day, absent: absent, strategy: $0)) }
+                  p.sort { $0.uncovered < $1.uncovered }
+                  plans = p
+                  planIdx = 0
+                  current = p.first?.assignments ?? []
+                  saved = false
+              }
+          }
+
+          struct ScheduleGrid: View {
+              @EnvironmentObject var store: Store
+              let lessons: [Lesson]
+              let showGroup: Bool
+              var body: some View {
+                  ScrollView {
+                      Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+                          GridRow {
+                              Text("")
+                              ForEach(dayNames, id: \.self) { Text($0).bold() }
+                          }
+                          ForEach(store.data.periods) { p in
+                              GridRow {
+                                  Text("P\(p.id)\n\(p.time)").font(.caption)
+                                  ForEach(0..<5, id: \.self) { d in
+                                      VStack(alignment: .leading) {
+                                          ForEach(lessons.filter { $0.day == d && $0.period == p.id }) { l in
+                                              Text("\(l.subject)\n\(showGroup ? l.group : store.name(l.teacherID))").font(.caption)
+                                          }
+                                      }
+                                      .frame(maxWidth: .infinity, minHeight: 44, alignment: .topLeading)
+                                      .padding(4)
+                                      .background(Color.gray.opacity(0.12))
+                                      .cornerRadius(6)
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          struct ConsultView: View {
+              @EnvironmentObject var store: Store
+              @State private var byGroup = true
+              @State private var group = ""
+              @State private var teacher: UUID?
+              var filtered: [Lesson] {
+                  byGroup ? store.data.lessons.filter { $0.group == group }
+                          : store.data.lessons.filter { $0.teacherID == teacher }
+              }
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 12) {
+                      Text("Consultar horarios").font(.title.bold())
+                      Picker("", selection: $byGroup) {
+                          Text("Por grupo").tag(true)
+                          Text("Por docente").tag(false)
+                      }.pickerStyle(.segmented).frame(width: 260)
+                      if byGroup {
+                          Picker("Grupo", selection: $group) {
+                              ForEach(store.groups, id: \.self) { Text($0).tag($0) }
+                          }.frame(width: 260)
+                      } else {
+                          Picker("Docente", selection: $teacher) {
+                              Text("—").tag(UUID?.none)
+                              ForEach(store.data.teachers) { Text($0.name).tag(Optional($0.id)) }
+                          }.frame(width: 320)
+                      }
+                      ScheduleGrid(lessons: filtered, showGroup: !byGroup)
+                  }
+                  .padding(24)
+              }
+          }
+
+          struct HistoryView: View {
+              @EnvironmentObject var store: Store
+              var body: some View {
+                  VStack(alignment: .leading) {
+                      Text("Historial de emergencias").font(.title.bold())
+                      List {
+                          ForEach(store.data.history) { r in
+                              VStack(alignment: .leading) {
+                                  Text(r.date.formatted(date: .long, time: .omitted)).bold()
+                                  Text("Ausentes: " + r.absentIDs.map { store.name($0) }.joined(separator: ", "))
+                                  Text("Cubiertas: \(r.assignments.filter { $0.coverTeacherID != nil }.count) de \(r.assignments.count)")
+                                      .foregroundStyle(.secondary)
+                              }
+                          }
+                          .onDelete { store.data.history.remove(atOffsets: $0) }
+                      }
+                  }
+                  .padding(24)
+              }
+          }
+          EOF
+      - name: Compilar y empaquetar .app
+        run: |
+          swift build -c release --arch arm64
+          BIN="$(swift build -c release --arch arm64 --show-bin-path)/HorariosEmergencia"
+          APP="HorariosEmergencia.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp "$BIN" "$APP/Contents/MacOS/HorariosEmergencia"
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleExecutable</key><string>HorariosEmergencia</string>
+          <key>CFBundleIdentifier</key><string>com.ietipam.horariosemergencia</string>
+          <key>CFBundleName</key><string>Horarios de Emergencia</string>
+          <key>CFBundleDisplayName</key><string>Horarios de Emergencia</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          <key>CFBundleShortVersionString</key><string>1.1</string>
+          <key>CFBundleVersion</key><string>2</string>
+          <key>LSMinimumSystemVersion</key><string>14.0</string>
+          <key>NSPrincipalClass</key><string>NSApplication</string>
+          <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          codesign --force --deep --sign - "$APP"
+          ditto -c -k --keepParent "$APP" HorariosEmergencia.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HorariosEmergencia-mac
+          path: HorariosEmergencia.zip
