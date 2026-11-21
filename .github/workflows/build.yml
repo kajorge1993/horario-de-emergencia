@@ -53,7 +53,11 @@ jobs:
               case estDocentes = "Configuración de docentes"
               case asocAsignaturas = "Docentes y asignaturas"
               case asocGrupos = "Docentes y grupos"
+              case dispDocentes = "Configurar disponibilidad docente"
+              case dispGrupos = "Configurar disponibilidad de grupos"
+              case dispPanel = "Panel de disponibilidad"
               var id: String { rawValue }
+              var isDisponibilidad: Bool { self == .dispDocentes || self == .dispGrupos || self == .dispPanel }
               var isEstructura: Bool {
                   switch self {
                   case .estGrupos, .estAreas, .estAsignaturas, .estDocentes, .asocAsignaturas, .asocGrupos: return true
@@ -77,6 +81,9 @@ jobs:
                   case .estDocentes: return "person.crop.rectangle.stack"
                   case .asocAsignaturas: return "link"
                   case .asocGrupos: return "person.3"
+                  case .dispDocentes: return "clock"
+                  case .dispGrupos: return "calendar.badge.clock"
+                  case .dispPanel: return "list.bullet.rectangle"
                   }
               }
           }
@@ -87,12 +94,17 @@ jobs:
                   NavigationSplitView {
                       List(selection: $sel) {
                           Section("Menú principal") {
-                              ForEach(Pantalla.allCases.filter { !$0.isEstructura }) { p in
+                              ForEach(Pantalla.allCases.filter { !$0.isEstructura && !$0.isDisponibilidad }) { p in
                                   Label(p.rawValue, systemImage: p.icon).tag(p)
                               }
                           }
                           Section("Estructura institucional") {
                               ForEach(Pantalla.allCases.filter { $0.isEstructura }) { p in
+                                  Label(p.rawValue, systemImage: p.icon).tag(p)
+                              }
+                          }
+                          Section("Disponibilidad de períodos") {
+                              ForEach(Pantalla.allCases.filter { $0.isDisponibilidad }) { p in
                                   Label(p.rawValue, systemImage: p.icon).tag(p)
                               }
                           }
@@ -115,6 +127,9 @@ jobs:
                       case .estDocentes: TeachersConfigView()
                       case .asocAsignaturas: AssocView(bySubject: true)
                       case .asocGrupos: AssocView(bySubject: false)
+                      case .dispDocentes: AvailabilityConfigView(kind: "T")
+                      case .dispGrupos: AvailabilityConfigView(kind: "G")
+                      case .dispPanel: AvailabilityScreen()
                       }
                   }
               }
@@ -165,6 +180,23 @@ jobs:
               }
           }
 
+          enum AvailState: String, Codable, CaseIterable, Identifiable {
+              case available = "Disponible"
+              case free = "Libre"
+              case restricted = "Restringida"
+              var id: String { rawValue }
+          }
+
+          /// Estado de un período para un docente ("T") o un grupo ("G"). Sin entrada = Disponible.
+          struct AvailEntry: Codable, Hashable {
+              var kind: String
+              var owner: String      // UUID del docente o clave (skey) del grupo
+              var day: Int
+              var period: Int
+              var state: AvailState
+              var modified: Date
+          }
+
           struct SchoolGroup: Identifiable, Codable, Hashable {
               var id = UUID()
               var name: String
@@ -202,6 +234,7 @@ jobs:
               var subject: String
               var absentTeacherID: UUID
               var coverTeacherID: UUID?
+              var fromPeriod: Int? = nil      // si la clase fue movida desde otro período
           }
 
           struct EmergencyRecord: Identifiable, Codable {
@@ -233,8 +266,9 @@ jobs:
               var groupList: [SchoolGroup] = []
               var areaList: [Area] = []
               var subjectList: [Subject] = []
+              var availability: [AvailEntry] = []
               enum CodingKeys: String, CodingKey {
-                  case teachers, lessons, periods, breakTime, history, groupList, areaList, subjectList
+                  case teachers, lessons, periods, breakTime, history, groupList, areaList, subjectList, availability
               }
           }
 
@@ -251,6 +285,7 @@ jobs:
                   groupList = try c.decodeIfPresent([SchoolGroup].self, forKey: .groupList) ?? []
                   areaList = try c.decodeIfPresent([Area].self, forKey: .areaList) ?? []
                   subjectList = try c.decodeIfPresent([Subject].self, forKey: .subjectList) ?? []
+                  availability = try c.decodeIfPresent([AvailEntry].self, forKey: .availability) ?? []
               }
           }
           EOF
@@ -328,20 +363,27 @@ jobs:
               var uncovered: Int { assignments.filter { $0.coverTeacherID == nil }.count }
           }
 
-          /// Un docente asistente cubre la clase del ausente en el mismo período y grupo (el grupo nunca
-          /// queda con hora libre). Usa la estructura institucional: docentes activos, asignaturas y áreas
-          /// registradas, y disponibilidad por día y período.
+          /// Reglas de bloqueo obligatorias:
+          /// · Docente: solo se considera si el período está en estado "Disponible" y no tiene clase ni otra cobertura.
+          ///   "Libre" y "Restringida" lo excluyen por completo.
+          /// · Grupo: sus clases originales se conservan. Si no hay docente para cubrir una clase en su período,
+          ///   se intenta moverla a otro período del grupo que esté "Disponible" y sin clase, sin crear horas libres
+          ///   intermedias ni cruces. Los períodos "Libres" o "Restringidos" del grupo nunca se ocupan.
           func solve(_ data: AppData, day: Int, absent: Set<UUID>, strategy: Strategy) -> [Assignment] {
+              let idx = data.availIndex
               let inactiveGroups = Set(data.groupList.filter { !$0.active }.map { skey($0.name) })
               let affected = data.lessons
                   .filter { $0.day == day && absent.contains($0.teacherID) && !inactiveGroups.contains(skey($0.group)) }
                   .sorted { $0.period != $1.period ? $0.period < $1.period : $0.group < $1.group }
               var busy = Set(data.lessons.filter { $0.day == day }.map { "\($0.teacherID)|\($0.period)" })
+              var groupBusy: [String: Set<Int>] = [:]
+              for l in data.lessons where l.day == day { groupBusy[skey(l.group), default: []].insert(l.period) }
               var load: [UUID: Int] = [:]
               let present = data.teachers.filter { !absent.contains($0.id) && $0.active }
               var taught: [UUID: Set<String>] = [:]
               for l in data.lessons { taught[l.teacherID, default: []].insert(skey(l.subject)) }
               for t in data.teachers { for s in t.subjectNames { taught[t.id, default: []].insert(skey(s)) } }
+              let periodIDs = data.periods.map(\.id)
 
               func areaName(ofSubject s: String) -> String {
                   guard let id = data.subjectList.first(where: { skey($0.name) == skey(s) })?.areaID else { return "" }
@@ -353,42 +395,68 @@ jobs:
                   for s in t.subjectNames { let a = areaName(ofSubject: s); if !a.isEmpty { r.insert(skey(a)) } }
                   return r
               }
+              func rank(_ t: Teacher, _ l: Lesson) -> Int {
+                  let lessonArea = skey(areaName(ofSubject: l.subject))
+                  let absentArea = skey(data.teachers.first { $0.id == l.teacherID }?.area ?? "")
+                  let teaches = taught[t.id]?.contains(skey(l.subject)) ?? false
+                  let ta = areas(t)
+                  let sameArea = (!lessonArea.isEmpty && ta.contains(lessonArea)) || (!absentArea.isEmpty && ta.contains(absentArea))
+                  let ld = load[t.id] ?? 0
+                  switch strategy {
+                  case .materia:    return (teaches ? 0 : (sameArea ? 1 : 2)) * 100 + ld
+                  case .equilibrio: return ld * 100 + (teaches ? 0 : (sameArea ? 1 : 2))
+                  case .area:       return ((teaches || sameArea) ? 0 : 1) * 100 + ld
+                  }
+              }
+              func teacherOK(_ t: Teacher, _ p: Int) -> Bool {
+                  !busy.contains("\(t.id)|\(p)") && stateOf(idx, "T", t.id.uuidString, day, p) == .available
+              }
 
               var result: [Assignment] = []
               for l in affected {
-                  let lessonArea = skey(areaName(ofSubject: l.subject))
-                  let absentArea = skey(data.teachers.first { $0.id == l.teacherID }?.area ?? "")
-                  let cands = present.filter {
-                      !busy.contains("\($0.id)|\(l.period)") && !$0.unavailable.contains("\(day)|\(l.period)")
-                  }
-                  func rank(_ t: Teacher) -> Int {
-                      let teaches = taught[t.id]?.contains(skey(l.subject)) ?? false
-                      let ta = areas(t)
-                      let sameArea = (!lessonArea.isEmpty && ta.contains(lessonArea)) || (!absentArea.isEmpty && ta.contains(absentArea))
-                      let ld = load[t.id] ?? 0
-                      switch strategy {
-                      case .materia:    return (teaches ? 0 : (sameArea ? 1 : 2)) * 100 + ld
-                      case .equilibrio: return ld * 100 + (teaches ? 0 : (sameArea ? 1 : 2))
-                      case .area:       return ((teaches || sameArea) ? 0 : 1) * 100 + ld
-                      }
-                  }
-                  let pick = cands.min { rank($0) < rank($1) }
-                  if let p = pick {
+                  // 1) Cubrir la clase en su mismo período con un docente en hora disponible
+                  let cands = present.filter { teacherOK($0, l.period) }
+                  if let p = cands.min(by: { rank($0, l) < rank($1, l) }) {
                       busy.insert("\(p.id)|\(l.period)")
                       load[p.id, default: 0] += 1
+                      result.append(Assignment(group: l.group, period: l.period, subject: l.subject,
+                                               absentTeacherID: l.teacherID, coverTeacherID: p.id))
+                      continue
                   }
-                  result.append(Assignment(group: l.group, period: l.period, subject: l.subject,
-                                           absentTeacherID: l.teacherID, coverTeacherID: pick?.id))
+                  // 2) Reorganizar: mover la clase a otro período habilitado del grupo
+                  let gk = skey(l.group)
+                  var moved = false
+                  for q in periodIDs.sorted(by: { abs($0 - l.period) < abs($1 - l.period) }) where q != l.period {
+                      let occ = groupBusy[gk] ?? []
+                      guard !occ.contains(q), stateOf(idx, "G", gk, day, q) == .available else { continue }
+                      var after = occ
+                      after.remove(l.period)
+                      after.insert(q)
+                      guard let lo = after.min(), let hi = after.max(), hi - lo + 1 == after.count else { continue }
+                      guard let p = present.filter({ teacherOK($0, q) }).min(by: { rank($0, l) < rank($1, l) }) else { continue }
+                      busy.insert("\(p.id)|\(q)")
+                      load[p.id, default: 0] += 1
+                      groupBusy[gk] = after
+                      result.append(Assignment(group: l.group, period: q, subject: l.subject,
+                                               absentTeacherID: l.teacherID, coverTeacherID: p.id, fromPeriod: l.period))
+                      moved = true
+                      break
+                  }
+                  if !moved {
+                      result.append(Assignment(group: l.group, period: l.period, subject: l.subject,
+                                               absentTeacherID: l.teacherID, coverTeacherID: nil))
+                  }
               }
               return result
           }
 
-          /// Docentes asistentes, activos y libres en ese período (sin clase propia ni otra cobertura).
+          /// Docentes asistentes, activos, en HORA DISPONIBLE y sin clase ni otra cobertura en ese período.
           func availableTeachers(_ data: AppData, day: Int, period: Int, absent: Set<UUID>,
                                  assignments: [Assignment], excluding: UUID) -> [Teacher] {
-              data.teachers.filter { t in
+              let idx = data.availIndex
+              return data.teachers.filter { t in
                   t.active && !absent.contains(t.id)
-                  && !t.unavailable.contains("\(day)|\(period)")
+                  && stateOf(idx, "T", t.id.uuidString, day, period) == .available
                   && !data.lessons.contains { $0.day == day && $0.period == period && $0.teacherID == t.id }
                   && !assignments.contains { $0.id != excluding && $0.period == period && $0.coverTeacherID == t.id }
               }
@@ -429,6 +497,16 @@ jobs:
           /// con los registrados y completa las asociaciones docente–asignatura–grupo–área.
           func syncStructure(_ d: inout AppData) {
               seedStructure(&d)
+              // Migración: la antigua "no disponibilidad" de docentes pasa a HORA RESTRINGIDA.
+              for t in d.teachers where !t.unavailable.isEmpty {
+                  for k in t.unavailable {
+                      let p = k.split(separator: "|").compactMap { Int($0) }
+                      if p.count == 2, !d.availability.contains(where: { $0.kind == "T" && $0.owner == t.id.uuidString && $0.day == p[0] && $0.period == p[1] }) {
+                          setAvail(&d, kind: "T", owner: t.id.uuidString, day: p[0], period: p[1], state: .restricted)
+                      }
+                  }
+              }
+              for i in d.teachers.indices { d.teachers[i].unavailable = [] }
               var subjectArea: [String: String] = [:]
               for (a, subs) in seedStructureMap { for s in subs { subjectArea[skey(s)] = a } }
               for i in d.lessons.indices {
@@ -485,6 +563,10 @@ jobs:
 
           func validateLesson(_ d: AppData, _ l: Lesson, areaID: UUID?, authorized: Bool, ignoring: UUID?) -> LessonCheck {
               var c = LessonCheck()
+              let idx = d.availIndex
+              let unchanged = d.lessons.first(where: { $0.id == ignoring }).map {
+                  $0.day == l.day && $0.period == l.period && $0.teacherID == l.teacherID && skey($0.group) == skey(l.group)
+              } ?? false
               if l.group.isEmpty || l.subject.isEmpty || d.teachers.first(where: { $0.id == l.teacherID }) == nil {
                   c.errors.append("Seleccione grupo, asignatura y docente.")
                   return c
@@ -503,7 +585,13 @@ jobs:
                       if authorized { c.warnings.append("Asignación autorizada por coordinación (el docente no tiene registrada esta asignatura).") }
                       else { c.errors.append("\(t.name) no está habilitado para esta asignatura."); c.needsAuth = true }
                   }
-                  if t.unavailable.contains("\(l.day)|\(l.period)") { c.errors.append("El docente marcó este período como no disponible.") }
+                  if !unchanged {
+                      switch stateOf(idx, "T", t.id.uuidString, l.day, l.period) {
+                      case .free: c.errors.append("\(t.name) tiene este período como HORA LIBRE (conservada por coordinación). Cámbielo en «Configurar disponibilidad docente».")
+                      case .restricted: c.errors.append("\(t.name) tiene este período como HORA RESTRINGIDA: no puede recibir clases.")
+                      case .available: break
+                      }
+                  }
               }
               if !d.periods.contains(where: { $0.id == l.period }) { c.errors.append("El período no pertenece a la jornada configurada.") }
               if let o = d.lessons.first(where: { $0.id != ignoring && $0.day == l.day && $0.period == l.period && $0.teacherID == l.teacherID }) {
@@ -512,6 +600,13 @@ jobs:
               if let o = d.lessons.first(where: { $0.id != ignoring && $0.day == l.day && $0.period == l.period && skey($0.group) == skey(l.group) }) {
                   let n = d.teachers.first { $0.id == o.teacherID }?.name ?? "—"
                   c.errors.append("Conflicto: el grupo ya tiene \(o.subject) con \(n) en ese período.")
+              }
+              if !unchanged {
+                  switch stateOf(idx, "G", skey(l.group), l.day, l.period) {
+                  case .free: c.errors.append("El grupo \(l.group) tiene este período como HORA LIBRE: no se puede ocupar con una clase.")
+                  case .restricted: c.errors.append("El grupo \(l.group) tiene este período como HORA RESTRINGIDA: no se pueden programar clases.")
+                  case .available: break
+                  }
               }
               return c
           }
@@ -656,6 +751,9 @@ jobs:
                   let old = d.groupList[i].name
                   d.groupList[i].name = new
                   d.groupList[i].grade = gradeOf(new)
+                  for j in d.availability.indices where d.availability[j].kind == "G" && d.availability[j].owner == skey(old) {
+                      d.availability[j].owner = skey(new)
+                  }
                   for j in d.lessons.indices where skey(d.lessons[j].group) == skey(old) { d.lessons[j].group = new }
                   for j in d.teachers.indices {
                       d.teachers[j].groupNames = d.teachers[j].groupNames.map { skey($0) == skey(old) ? new : $0 }
@@ -666,6 +764,7 @@ jobs:
                   var d = store.data
                   guard let g = d.groupList.first(where: { $0.id == id }) else { return }
                   d.lessons.removeAll { skey($0.group) == skey(g.name) }
+                  d.availability.removeAll { $0.kind == "G" && $0.owner == skey(g.name) }
                   for j in d.teachers.indices { d.teachers[j].groupNames.removeAll { skey($0) == skey(g.name) } }
                   d.groupList.removeAll { $0.id == id }
                   store.data = d
@@ -889,14 +988,6 @@ jobs:
                   store.data = d
                   msg = "\(n) docentes agregados."
               }
-              func availBinding(_ i: Int, _ key: String) -> Binding<Bool> {
-                  Binding(get: { i < store.data.teachers.count && !store.data.teachers[i].unavailable.contains(key) },
-                          set: { on in
-                              guard i < store.data.teachers.count else { return }
-                              store.data.teachers[i].unavailable.removeAll { $0 == key }
-                              if !on { store.data.teachers[i].unavailable.append(key) }
-                          })
-              }
               func areaBinding(_ i: Int, _ name: String) -> Binding<Bool> {
                   Binding(get: { i < store.data.teachers.count && store.data.teachers[i].areaNames.contains { skey($0) == skey(name) } },
                           set: { on in
@@ -936,19 +1027,8 @@ jobs:
                                       Toggle("Activo", isOn: $store.data.teachers[i].active)
                                       Text("Áreas que puede orientar").font(.headline)
                                       ForEach(store.data.areaList.filter(\.active)) { a in Toggle(a.name, isOn: areaBinding(i, a.name)) }
-                                      Text("Disponibilidad horaria (marcado = disponible)").font(.headline)
-                                      Grid(alignment: .leading) {
-                                          GridRow { Text(""); ForEach(dayNames, id: \.self) { Text($0).font(.caption) } }
-                                          ForEach(store.data.periods) { p in
-                                              GridRow {
-                                                  Text("P\(p.id)").font(.caption)
-                                                  ForEach(0..<5, id: \.self) { d in
-                                                      Toggle("", isOn: availBinding(i, "\(d)|\(p.id)")).labelsHidden()
-                                                  }
-                                              }
-                                          }
-                                      }
-                                      Text("Asignaturas: " + (t.subjectNames.isEmpty ? "—" : t.subjectNames.joined(separator: ", ")))
+                                      Text("La disponibilidad por período (disponible / libre / restringida) se configura en «Configurar disponibilidad docente».").font(.caption).foregroundStyle(.secondary)
+                                                Text("Asignaturas: " + (t.subjectNames.isEmpty ? "—" : t.subjectNames.joined(separator: ", ")))
                                       Text("Grupos: " + (t.groupNames.isEmpty ? "—" : t.groupNames.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.joined(separator: ", ")))
                                       Text("Se editan en «Docentes y asignaturas» y «Docentes y grupos».").font(.caption).foregroundStyle(.secondary)
                                       Button("Eliminar docente…", role: .destructive) { confirmDelete = true }
@@ -968,6 +1048,7 @@ jobs:
                       Button("Eliminar y borrar sus clases", role: .destructive) {
                           if let i = idx { let id = store.data.teachers[i].id
                               store.data.lessons.removeAll { $0.teacherID == id }
+                              store.data.availability.removeAll { $0.kind == "T" && $0.owner == id.uuidString }
                               store.data.teachers.remove(at: i); sel = nil }
                       }
                       Button("Cancelar", role: .cancel) {}
@@ -1048,6 +1129,403 @@ jobs:
               }
           }
           EOF
+          cat > Sources/HorariosEmergencia/Availability.swift <<'EOF'
+          import SwiftUI
+
+          // MARK: - Lógica de estados de período (docentes y grupos)
+
+          func availKey(_ kind: String, _ owner: String, _ day: Int, _ period: Int) -> String { "\(kind)|\(owner)|\(day)|\(period)" }
+
+          /// Sin configuración explícita, un período es "Disponible".
+          func stateOf(_ idx: [String: AvailState], _ kind: String, _ owner: String, _ day: Int, _ period: Int) -> AvailState {
+              idx[availKey(kind, owner, day, period)] ?? .available
+          }
+
+          extension AppData {
+              var availIndex: [String: AvailState] {
+                  var m: [String: AvailState] = [:]
+                  for e in availability { m[availKey(e.kind, e.owner, e.day, e.period)] = e.state }
+                  return m
+              }
+          }
+
+          func setAvail(_ d: inout AppData, kind: String, owner: String, day: Int, period: Int, state: AvailState) {
+              let now = Date()
+              if let i = d.availability.firstIndex(where: { $0.kind == kind && $0.owner == owner && $0.day == day && $0.period == period }) {
+                  d.availability[i].state = state
+                  d.availability[i].modified = now
+              } else {
+                  d.availability.append(AvailEntry(kind: kind, owner: owner, day: day, period: period, state: state, modified: now))
+              }
+          }
+
+          /// Docentes que NO pueden participar en ese período por su estado (libre o restringido).
+          func blockedTeachers(_ d: AppData, day: Int, period: Int, absent: Set<UUID>) -> [String] {
+              let idx = d.availIndex
+              var out: [String] = []
+              for t in d.teachers where t.active && !absent.contains(t.id) {
+                  if d.lessons.contains(where: { $0.day == day && $0.period == period && $0.teacherID == t.id }) { continue }
+                  switch stateOf(idx, "T", t.id.uuidString, day, period) {
+                  case .free: out.append("\(t.name) (hora libre)")
+                  case .restricted: out.append("\(t.name) (restringida)")
+                  case .available: break
+                  }
+              }
+              return out
+          }
+
+          func uncoveredReason(_ d: AppData, day: Int, period: Int, absent: Set<UUID>, assignments: [Assignment]) -> String {
+              let idx = d.availIndex
+              var busy = 0, free = 0, restr = 0, total = 0
+              for t in d.teachers where t.active && !absent.contains(t.id) {
+                  total += 1
+                  let hasClass = d.lessons.contains { $0.day == day && $0.period == period && $0.teacherID == t.id }
+                  let covering = assignments.contains { $0.period == period && $0.coverTeacherID == t.id }
+                  if hasClass || covering { busy += 1; continue }
+                  switch stateOf(idx, "T", t.id.uuidString, day, period) {
+                  case .free: free += 1
+                  case .restricted: restr += 1
+                  case .available: break
+                  }
+              }
+              return "Sin cobertura en P\(period): de \(total) docentes asistentes, \(busy) tienen clase o cobertura, \(free) tienen hora libre y \(restr) hora restringida. El grupo tampoco tiene otro período habilitado donde mover la clase."
+          }
+
+          // MARK: - Colores y leyenda uniformes
+
+          extension AvailState {
+              var color: Color {
+                  switch self {
+                  case .available: return .green
+                  case .free: return .gray
+                  case .restricted: return .red
+                  }
+              }
+          }
+
+          struct AvailLegend: View {
+              var body: some View {
+                  HStack(spacing: 8) {
+                      Text("Leyenda:").font(.caption).foregroundStyle(.secondary)
+                      ForEach(AvailState.allCases) { s in
+                          Text(s.rawValue).font(.caption).padding(.horizontal, 8).padding(.vertical, 3)
+                              .background(s.color.opacity(0.35)).cornerRadius(5)
+                      }
+                      Text("Clase original").font(.caption).padding(.horizontal, 8).padding(.vertical, 3)
+                          .background(Color.blue.opacity(0.18)).cornerRadius(5)
+                  }
+              }
+          }
+
+          func setBinding(_ s: Binding<Set<Int>>, _ v: Int) -> Binding<Bool> {
+              Binding(get: { s.wrappedValue.contains(v) },
+                      set: { if $0 { s.wrappedValue.insert(v) } else { s.wrappedValue.remove(v) } })
+          }
+
+          // MARK: - Configurar disponibilidad (docente "T" o grupo "G")
+
+          struct AvailabilityConfigView: View {
+              let kind: String
+              @EnvironmentObject var store: Store
+              @State private var sel = ""
+              @State private var bulkState: AvailState = .free
+              @State private var days = Set<Int>()
+              @State private var periodsSel = Set<Int>()
+              @State private var fromDay = 0
+              @State private var toDay = 1
+              @State private var target = ""
+              @State private var pendingText = ""
+              @State private var pendingRun: (() -> Void)?
+
+              var isT: Bool { kind == "T" }
+              var ownerKey: String { isT ? sel : skey(sel) }
+              func key(of opt: String) -> String { isT ? opt : skey(opt) }
+              var options: [PickOpt] {
+                  if isT { return store.data.teachers.filter(\.active).map { PickOpt(id: $0.id.uuidString, label: $0.name) } }
+                  return store.data.groupList.filter(\.active)
+                      .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                      .map { PickOpt(id: $0.name, label: $0.name) }
+              }
+              func ownerName(_ opt: String) -> String { options.first { $0.id == opt }?.label ?? opt }
+
+              func classText(_ day: Int, _ p: Int) -> String? {
+                  if isT {
+                      guard let l = store.data.lessons.first(where: { $0.teacherID.uuidString == sel && $0.day == day && $0.period == p }) else { return nil }
+                      return "\(l.subject) · \(l.group)"
+                  }
+                  guard let l = store.data.lessons.first(where: { skey($0.group) == skey(sel) && $0.day == day && $0.period == p }) else { return nil }
+                  return "\(l.subject) · \(store.name(l.teacherID))"
+              }
+              func change(_ text: String, _ run: @escaping (inout AppData) -> Void) {
+                  pendingText = text
+                  pendingRun = { var d = store.data; run(&d); store.data = d }
+              }
+              func cellBinding(_ day: Int, _ p: Int) -> Binding<AvailState> {
+                  let k = kind, ok = ownerKey
+                  return Binding(get: { stateOf(store.data.availIndex, k, ok, day, p) },
+                                 set: { v in var d = store.data; setAvail(&d, kind: k, owner: ok, day: day, period: p, state: v); store.data = d })
+              }
+              func cell(_ day: Int, _ p: PeriodInfo, _ idx: [String: AvailState]) -> some View {
+                  let st = stateOf(idx, kind, ownerKey, day, p.id)
+                  return VStack(alignment: .leading, spacing: 2) {
+                      Picker("", selection: cellBinding(day, p.id)) {
+                          ForEach(AvailState.allCases) { Text($0.rawValue).tag($0) }
+                      }.labelsHidden().pickerStyle(.menu)
+                      if let c = classText(day, p.id) { Text(c).font(.caption2).foregroundStyle(.secondary).lineLimit(2) }
+                  }
+                  .padding(4).frame(width: 140, alignment: .leading)
+                  .background(st.color.opacity(0.3)).cornerRadius(6)
+              }
+
+              func applyBulk() {
+                  let st = bulkState, ds = days.sorted(), ps = periodsSel.sorted(), k = kind, ok = ownerKey
+                  change("Se cambiarán \(ds.count * ps.count) celdas de \(ownerName(sel)) a «\(st.rawValue)». Las clases originales no se modifican. ¿Continuar?") { d in
+                      for dd in ds { for pp in ps { setAvail(&d, kind: k, owner: ok, day: dd, period: pp, state: st) } }
+                  }
+              }
+              func copyDay() {
+                  let a = fromDay, b = toDay, k = kind, ok = ownerKey
+                  let idx = store.data.availIndex, pids = store.data.periods.map(\.id)
+                  change("Se copiará la configuración de \(dayNames[a]) a \(dayNames[b]) para \(ownerName(sel)). ¿Continuar?") { d in
+                      for p in pids { setAvail(&d, kind: k, owner: ok, day: b, period: p, state: stateOf(idx, k, ok, a, p)) }
+                  }
+              }
+              func copyOwner() {
+                  let src = ownerKey, tk = key(of: target), k = kind
+                  change("Se copiará toda la configuración de \(ownerName(sel)) a \(ownerName(target)), reemplazando la que tenga. ¿Continuar?") { d in
+                      let entries = d.availability.filter { $0.kind == k && $0.owner == src }
+                      d.availability.removeAll { $0.kind == k && $0.owner == tk }
+                      for e in entries { var n = e; n.owner = tk; n.modified = Date(); d.availability.append(n) }
+                  }
+              }
+              func resetOwner() {
+                  let ok = ownerKey, k = kind
+                  change("Se restablecerá la configuración de \(ownerName(sel)): todos sus períodos quedarán como Disponible. ¿Continuar?") { d in
+                      d.availability.removeAll { $0.kind == k && $0.owner == ok }
+                  }
+              }
+
+              var body: some View {
+                  let idx = store.data.availIndex
+                  VStack(alignment: .leading, spacing: 10) {
+                      Text(isT ? "Configurar disponibilidad docente" : "Configurar disponibilidad de grupos").font(.title.bold())
+                      AvailLegend()
+                      SearchPick(title: isT ? "Docente" : "Grupo", options: options, selection: $sel)
+                      if sel.isEmpty {
+                          Text("Seleccione \(isT ? "un docente" : "un grupo") para ver y configurar su horario semanal.").foregroundStyle(.secondary)
+                      } else {
+                          let all = (0..<5).flatMap { d in store.data.periods.map { stateOf(idx, kind, ownerKey, d, $0.id) } }
+                          Text("Disponibles: \(all.filter { $0 == .available }.count) · Libres: \(all.filter { $0 == .free }.count) · Restringidas: \(all.filter { $0 == .restricted }.count)")
+                              .font(.caption).foregroundStyle(.secondary)
+                          ScrollView([.horizontal, .vertical]) {
+                              VStack(alignment: .leading, spacing: 14) {
+                                  Grid(alignment: .topLeading, horizontalSpacing: 6, verticalSpacing: 6) {
+                                      GridRow { Text(""); ForEach(0..<5, id: \.self) { Text(dayNames[$0]).font(.caption.bold()) } }
+                                      ForEach(store.data.periods) { p in
+                                          GridRow {
+                                              Text("P\(p.id)\n\(p.time)").font(.caption2)
+                                              ForEach(0..<5, id: \.self) { d in cell(d, p, idx) }
+                                          }
+                                      }
+                                  }
+                                  Text("Las clases ya programadas se conservan; el estado solo controla nuevas asignaciones.")
+                                      .font(.caption).foregroundStyle(.secondary)
+                                  GroupBox("Cambios masivos") {
+                                      VStack(alignment: .leading, spacing: 8) {
+                                          Picker("Estado", selection: $bulkState) {
+                                              ForEach(AvailState.allCases) { Text($0.rawValue).tag($0) }
+                                          }.pickerStyle(.segmented).frame(width: 360)
+                                          HStack {
+                                              Text("Días:")
+                                              ForEach(0..<5, id: \.self) { d in Toggle(String(dayNames[d].prefix(3)), isOn: setBinding($days, d)) }
+                                              Button("Todos") { days = Set(0..<5) }
+                                          }
+                                          HStack {
+                                              Text("Períodos:")
+                                              ForEach(store.data.periods) { p in Toggle("P\(p.id)", isOn: setBinding($periodsSel, p.id)) }
+                                              Button("Todos") { periodsSel = Set(store.data.periods.map(\.id)) }
+                                          }
+                                          Button("Aplicar a la selección…") { applyBulk() }.disabled(days.isEmpty || periodsSel.isEmpty)
+                                          Divider()
+                                          HStack {
+                                              Picker("Copiar día", selection: $fromDay) { ForEach(0..<5, id: \.self) { Text(dayNames[$0]).tag($0) } }.frame(width: 230)
+                                              Picker("a", selection: $toDay) { ForEach(0..<5, id: \.self) { Text(dayNames[$0]).tag($0) } }.frame(width: 190)
+                                              Button("Copiar día…") { copyDay() }.disabled(fromDay == toDay)
+                                          }
+                                          HStack {
+                                              SearchPick(title: isT ? "Copiar a" : "Copiar a", options: options.filter { $0.id != sel }, selection: $target)
+                                              Button("Copiar configuración…") { copyOwner() }.disabled(target.isEmpty)
+                                          }
+                                          Button("Restablecer configuración original…", role: .destructive) { resetOwner() }
+                                      }.padding(6)
+                                  }.frame(maxWidth: 640)
+                              }
+                          }
+                      }
+                  }
+                  .padding(24)
+                  .alert("Confirmar cambios", isPresented: Binding(get: { pendingRun != nil }, set: { if !$0 { pendingRun = nil } })) {
+                      Button("Aplicar", role: .destructive) { pendingRun?(); pendingRun = nil }
+                      Button("Cancelar", role: .cancel) { pendingRun = nil }
+                  } message: { Text(pendingText) }
+              }
+          }
+
+          // MARK: - Panel de disponibilidad con filtros
+
+          enum PanelFilter: String, CaseIterable, Identifiable {
+              case tAvail = "Docentes disponibles"
+              case tFree = "Docentes con hora libre"
+              case tRestr = "Docentes con hora restringida"
+              case gAvail = "Grupos con hora disponible"
+              case gFree = "Grupos con hora libre"
+              case gRestr = "Grupos con hora restringida"
+              var id: String { rawValue }
+              var isTeacher: Bool { self == .tAvail || self == .tFree || self == .tRestr }
+              var state: AvailState {
+                  switch self {
+                  case .tAvail, .gAvail: return .available
+                  case .tFree, .gFree: return .free
+                  default: return .restricted
+                  }
+              }
+          }
+
+          struct PanelRow: Identifiable { let id = UUID(); let name: String; let state: AvailState; let note: String }
+
+          struct AvailabilityPanel: View {
+              var fixedDay: Int? = nil
+              var absent: Set<UUID> = []
+              @EnvironmentObject var store: Store
+              @State private var day = 0
+              @State private var period = 1
+              @State private var filter: PanelFilter = .tAvail
+
+              var d: Int { fixedDay ?? day }
+              func rows() -> [PanelRow] {
+                  let idx = store.data.availIndex
+                  let target = filter.state
+                  if filter.isTeacher {
+                      return store.data.teachers.filter { $0.active && !absent.contains($0.id) }.compactMap { t -> PanelRow? in
+                          let st = stateOf(idx, "T", t.id.uuidString, d, period)
+                          guard st == target else { return nil }
+                          let cls = store.data.lessons.first { $0.teacherID == t.id && $0.day == d && $0.period == period }
+                          if target == .available && cls != nil { return nil }
+                          return PanelRow(name: t.name, state: st, note: cls.map { "con clase: \($0.subject) · \($0.group)" } ?? "sin clase")
+                      }
+                  }
+                  return store.data.groupList.filter(\.active).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.compactMap { g -> PanelRow? in
+                      let st = stateOf(idx, "G", skey(g.name), d, period)
+                      guard st == target else { return nil }
+                      let cls = store.data.lessons.first { skey($0.group) == skey(g.name) && $0.day == d && $0.period == period }
+                      if target == .available && cls != nil { return nil }
+                      return PanelRow(name: g.name, state: st, note: cls.map { "con clase: \($0.subject)" } ?? "sin clase")
+                  }
+              }
+              var body: some View {
+                  let r = rows()
+                  VStack(alignment: .leading, spacing: 8) {
+                      HStack {
+                          if fixedDay == nil {
+                              Picker("Día", selection: $day) { ForEach(0..<5, id: \.self) { Text(dayNames[$0]).tag($0) } }.frame(width: 200)
+                          } else if d <= 4 {
+                              Text(dayNames[d]).bold()
+                          }
+                          Picker("Período", selection: $period) { ForEach(store.data.periods) { Text("P\($0.id)").tag($0.id) } }.frame(width: 150)
+                          Picker("Mostrar", selection: $filter) { ForEach(PanelFilter.allCases) { Text($0.rawValue).tag($0) } }.frame(width: 340)
+                      }
+                      Text("\(r.count) resultados").font(.caption).foregroundStyle(.secondary)
+                      List(r) { row in
+                          HStack {
+                              Text(row.name)
+                              Spacer()
+                              Text(row.note).font(.caption).foregroundStyle(.secondary)
+                              Text(row.state.rawValue).font(.caption).padding(.horizontal, 6).padding(.vertical, 2)
+                                  .background(row.state.color.opacity(0.4)).cornerRadius(4)
+                          }.listRowBackground(row.state.color.opacity(0.15))
+                      }
+                  }
+              }
+          }
+
+          struct AvailabilityScreen: View {
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 10) {
+                      Text("Panel de disponibilidad").font(.title.bold())
+                      AvailLegend()
+                      AvailabilityPanel()
+                  }.padding(24)
+              }
+          }
+
+          // MARK: - Exportaciones (PDF coloreado y CSV)
+
+          struct AvailCell: Hashable { let text: String; let state: AvailState }
+
+          struct AvailPDFView: View {
+              let title: String
+              let subtitle: String
+              let periods: [String]
+              let cells: [[AvailCell]]      // [período][día]
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 8) {
+                      Text(title).font(.title2.bold())
+                      Text(subtitle).font(.subheadline)
+                      Grid(alignment: .topLeading, horizontalSpacing: 4, verticalSpacing: 4) {
+                          GridRow { Text(""); ForEach(0..<5, id: \.self) { Text(dayNames[$0]).font(.caption.bold()) } }
+                          ForEach(periods.indices, id: \.self) { i in
+                              GridRow {
+                                  Text(periods[i]).font(.caption2)
+                                  ForEach(0..<5, id: \.self) { d in
+                                      let c = cells[i][d]
+                                      Text(c.state.rawValue + (c.text.isEmpty ? "" : "\n" + c.text)).font(.caption2)
+                                          .frame(width: 116, height: 44, alignment: .topLeading).padding(3)
+                                          .background(c.state.color.opacity(0.35)).cornerRadius(4)
+                                  }
+                              }
+                          }
+                      }
+                      Text("Verde = disponible · Gris = hora libre · Rojo = hora restringida").font(.caption)
+                  }
+                  .padding(32).frame(width: 760, alignment: .topLeading)
+                  .background(Color.white).foregroundColor(.black)
+              }
+          }
+
+          func makeAvailPDF(_ d: AppData, kind: String, owner: String, name: String) -> AvailPDFView {
+              let idx = d.availIndex
+              let key = kind == "T" ? owner : skey(owner)
+              var rows: [[AvailCell]] = []
+              for p in d.periods {
+                  var row: [AvailCell] = []
+                  for day in 0..<5 {
+                      let st = stateOf(idx, kind, key, day, p.id)
+                      var txt = ""
+                      if kind == "T" {
+                          if let l = d.lessons.first(where: { $0.teacherID.uuidString == owner && $0.day == day && $0.period == p.id }) { txt = "\(l.subject) · \(l.group)" }
+                      } else if let l = d.lessons.first(where: { skey($0.group) == skey(owner) && $0.day == day && $0.period == p.id }) {
+                          txt = "\(l.subject) · \(d.teachers.first { $0.id == l.teacherID }?.name ?? "—")"
+                      }
+                      row.append(AvailCell(text: txt, state: st))
+                  }
+                  rows.append(row)
+              }
+              return AvailPDFView(title: "Disponibilidad – \(name)",
+                                  subtitle: (kind == "T" ? "Docente" : "Grupo") + " · generado el " + Date().formatted(date: .long, time: .omitted),
+                                  periods: d.periods.map { "P\($0.id) \($0.time)" }, cells: rows)
+          }
+
+          func availabilityCSV(_ d: AppData) -> [String] {
+              var out = [csvLine(["Tipo", "Docente / Grupo", "Día", "Período", "Estado", "Modificado"])]
+              for e in d.availability.sorted(by: { ($0.kind, $0.owner, $0.day, $0.period) < ($1.kind, $1.owner, $1.day, $1.period) }) {
+                  let name = e.kind == "T" ? (d.teachers.first { $0.id.uuidString == e.owner }?.name ?? "—")
+                                           : (d.groupList.first { skey($0.name) == e.owner }?.name ?? e.owner)
+                  out.append(csvLine([e.kind == "T" ? "Docente" : "Grupo", name, dayNames[e.day], "\(e.period)", e.state.rawValue,
+                                      e.modified.formatted(date: .numeric, time: .shortened)]))
+              }
+              return out
+          }
+          EOF
           cat > Sources/HorariosEmergencia/Lessons.swift <<'EOF'
           import SwiftUI
 
@@ -1058,6 +1536,7 @@ jobs:
               @State private var sel = Set<UUID>()
               @State private var showEditor = false
               @State private var editTarget: Lesson?
+              @State private var weekly = false
 
               func areaName(_ subject: String) -> String {
                   guard let id = store.data.subjectList.first(where: { skey($0.name) == skey(subject) })?.areaID else { return "—" }
@@ -1078,6 +1557,12 @@ jobs:
                           }.disabled(sel.isEmpty)
                       }
                       IndicatorsBar()
+                      HStack {
+                          Picker("", selection: $weekly) { Text("Lista").tag(false); Text("Semana (colores)").tag(true) }
+                              .pickerStyle(.segmented).frame(width: 260)
+                          AvailLegend()
+                      }
+                      if weekly { ConsultView(embedded: true) } else {
                       Table(store.data.lessons, selection: $sel) {
                           TableColumn("Grupo") { Text($0.group) }
                           TableColumn("Día") { Text(dayNames[$0.day]) }
@@ -1085,6 +1570,7 @@ jobs:
                           TableColumn("Área") { Text(areaName($0.subject)) }
                           TableColumn("Asignatura") { Text($0.subject) }
                           TableColumn("Docente") { Text(store.name($0.teacherID)) }
+                      }
                       }
                   }
                   .padding(24)
@@ -1246,6 +1732,8 @@ jobs:
               @State private var kind = 0       // 0 general, 1 docente, 2 grupo
               @State private var teacher: UUID?
               @State private var group = ""
+              @State private var availTeacher: UUID?
+              @State private var availGroup = ""
 
               var record: EmergencyRecord? { store.data.history.first { $0.id == recID } ?? store.data.history.first }
 
@@ -1256,7 +1744,7 @@ jobs:
                   if kind == 2 { list = list.filter { $0.group == group } }
                   return list.sorted { $0.period < $1.period }.map { a in
                       ReportRow(period: "P\(a.period) " + (store.data.periods.first { $0.id == a.period }?.time ?? ""),
-                                group: a.group, subject: a.subject,
+                                group: a.group, subject: a.subject + (a.fromPeriod.map { " (movida desde P\($0))" } ?? ""),
                                 absent: store.name(a.absentTeacherID),
                                 cover: a.coverTeacherID == nil ? "SIN COBERTURA" : store.name(a.coverTeacherID))
                   }
@@ -1309,6 +1797,33 @@ jobs:
                                   }
                               }
                           }
+                      }
+                      Divider()
+                      Text("Disponibilidad de períodos (verde = disponible · gris = libre · rojo = restringida)").font(.headline)
+                      HStack {
+                          Picker("Docente", selection: $availTeacher) {
+                              Text("—").tag(UUID?.none)
+                              ForEach(store.data.teachers) { Text($0.name).tag(Optional($0.id)) }
+                          }.frame(width: 320)
+                          Button("PDF de disponibilidad del docente…") {
+                              if let t = availTeacher, let u = savePanel("Disponibilidad-docente.pdf") {
+                                  renderPDF(makeAvailPDF(store.data, kind: "T", owner: t.uuidString, name: store.name(t)), to: u)
+                              }
+                          }.disabled(availTeacher == nil)
+                      }
+                      HStack {
+                          Picker("Grupo", selection: $availGroup) {
+                              Text("—").tag("")
+                              ForEach(store.groups, id: \.self) { Text($0).tag($0) }
+                          }.frame(width: 260)
+                          Button("PDF de disponibilidad del grupo…") {
+                              if !availGroup.isEmpty, let u = savePanel("Disponibilidad-grupo.pdf") {
+                                  renderPDF(makeAvailPDF(store.data, kind: "G", owner: availGroup, name: availGroup), to: u)
+                              }
+                          }.disabled(availGroup.isEmpty)
+                      }
+                      Button("Exportar todos los estados de disponibilidad (CSV)…") {
+                          if let u = savePanel("Disponibilidad.csv") { writeCSV(availabilityCSV(store.data), to: u) }
                       }
                       Divider()
                       Button("Exportar horario institucional completo (CSV)…") {
@@ -1776,6 +2291,7 @@ jobs:
               @State private var planIdx = 0
               @State private var current: [Assignment] = []
               @State private var saved = false
+              @State private var showAvail = true
 
               var day: Int { (Calendar.current.component(.weekday, from: date) + 5) % 7 }
               var affected: [Lesson] { store.data.lessons.filter { $0.day == day && absent.contains($0.teacherID) } }
@@ -1796,6 +2312,10 @@ jobs:
                       .frame(width: 300)
 
                       VStack(alignment: .leading, spacing: 8) {
+                          AvailLegend()
+                          DisclosureGroup("Disponibilidad de docentes y grupos (filtros)", isExpanded: $showAvail) {
+                              AvailabilityPanel(fixedDay: min(day, 4), absent: absent).frame(height: 230)
+                          }
                           if plans.isEmpty {
                               Text("Marque los docentes ausentes y genere alternativas.").foregroundStyle(.secondary)
                           } else {
@@ -1809,19 +2329,35 @@ jobs:
                                   .font(.caption).foregroundStyle(.secondary)
                               List {
                                   ForEach($current) { $a in
-                                      HStack {
-                                          Text("P\(a.period)").bold().frame(width: 36)
-                                          Text(a.group).frame(width: 70, alignment: .leading)
-                                          Text(a.subject).frame(maxWidth: .infinity, alignment: .leading)
-                                          Text("Ausente: \(store.name(a.absentTeacherID))").foregroundStyle(.secondary)
-                                          Picker("", selection: $a.coverTeacherID) {
-                                              Text("Sin cobertura").tag(UUID?.none)
-                                              ForEach(availableTeachers(store.data, day: day, period: a.period, absent: absent,
-                                                                        assignments: current, excluding: a.id)) {
-                                                  Text($0.name).tag(Optional($0.id))
+                                      VStack(alignment: .leading, spacing: 2) {
+                                          HStack {
+                                              Text(a.fromPeriod == nil ? "P\(a.period)" : "P\(a.period)*").bold().frame(width: 44)
+                                              Text(a.group).frame(width: 70, alignment: .leading)
+                                              Text(a.subject).frame(maxWidth: .infinity, alignment: .leading)
+                                              Text("Ausente: \(store.name(a.absentTeacherID))").foregroundStyle(.secondary)
+                                              Picker("", selection: $a.coverTeacherID) {
+                                                  Text("Sin cobertura").tag(UUID?.none)
+                                                  ForEach(availableTeachers(store.data, day: day, period: a.period, absent: absent,
+                                                                            assignments: current, excluding: a.id)) {
+                                                      Text($0.name).tag(Optional($0.id))
+                                                  }
+                                              }
+                                              .frame(width: 200)
+                                          }
+                                          if let f = a.fromPeriod {
+                                              Text("* Clase movida desde el período \(f) a una hora disponible del grupo.")
+                                                  .font(.caption2).foregroundStyle(.secondary)
+                                          }
+                                          if a.coverTeacherID == nil {
+                                              Text(uncoveredReason(store.data, day: day, period: a.period, absent: absent, assignments: current))
+                                                  .font(.caption2).foregroundStyle(.red)
+                                          } else {
+                                              let b = blockedTeachers(store.data, day: day, period: a.period, absent: absent)
+                                              if !b.isEmpty {
+                                                  Text("Excluidos por su estado: " + b.joined(separator: ", "))
+                                                      .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
                                               }
                                           }
-                                          .frame(width: 200)
                                       }
                                       .listRowBackground(a.coverTeacherID == nil ? Color.red.opacity(0.15) : Color.orange.opacity(0.12))
                                   }
@@ -1859,36 +2395,51 @@ jobs:
               @EnvironmentObject var store: Store
               let lessons: [Lesson]
               let showGroup: Bool
+              var ownerKind: String? = nil
+              var ownerKey: String = ""
               var body: some View {
-                  ScrollView {
-                      Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
-                          GridRow {
-                              Text("")
-                              ForEach(dayNames, id: \.self) { Text($0).bold() }
-                          }
-                          ForEach(store.data.periods) { p in
+                  let idx = store.data.availIndex
+                  VStack(alignment: .leading, spacing: 8) {
+                      AvailLegend()
+                      ScrollView {
+                          Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
                               GridRow {
-                                  Text("P\(p.id)\n\(p.time)").font(.caption)
-                                  ForEach(0..<5, id: \.self) { d in
-                                      VStack(alignment: .leading) {
-                                          ForEach(lessons.filter { $0.day == d && $0.period == p.id }) { l in
-                                              Text("\(l.subject)\n\(showGroup ? l.group : store.name(l.teacherID))").font(.caption)
+                                  Text("")
+                                  ForEach(dayNames, id: \.self) { Text($0).bold() }
+                              }
+                              ForEach(store.data.periods) { p in
+                                  GridRow {
+                                      Text("P\(p.id)\n\(p.time)").font(.caption)
+                                      ForEach(0..<5, id: \.self) { d in
+                                          let ls = lessons.filter { $0.day == d && $0.period == p.id }
+                                          let st: AvailState? = ownerKind.map { stateOf(idx, $0, ownerKey, d, p.id) }
+                                          VStack(alignment: .leading) {
+                                              ForEach(ls) { l in
+                                                  Text("\(l.subject)\n\(showGroup ? l.group : store.name(l.teacherID))").font(.caption)
+                                              }
+                                              if ls.isEmpty, let s = st { Text(s.rawValue).font(.caption2).foregroundStyle(.secondary) }
                                           }
+                                          .frame(maxWidth: .infinity, minHeight: 44, alignment: .topLeading)
+                                          .padding(4)
+                                          .background(cellColor(ls.isEmpty, st))
+                                          .cornerRadius(6)
                                       }
-                                      .frame(maxWidth: .infinity, minHeight: 44, alignment: .topLeading)
-                                      .padding(4)
-                                      .background(Color.gray.opacity(0.12))
-                                      .cornerRadius(6)
                                   }
                               }
                           }
                       }
                   }
               }
+              func cellColor(_ empty: Bool, _ st: AvailState?) -> Color {
+                  if !empty { return Color.blue.opacity(0.15) }
+                  if let s = st { return s.color.opacity(0.3) }
+                  return Color.gray.opacity(0.12)
+              }
           }
 
           struct ConsultView: View {
               @EnvironmentObject var store: Store
+              var embedded = false
               @State private var byGroup = true
               @State private var group = ""
               @State private var teacher: UUID?
@@ -1898,7 +2449,7 @@ jobs:
               }
               var body: some View {
                   VStack(alignment: .leading, spacing: 12) {
-                      Text("Consultar horarios").font(.title.bold())
+                      if !embedded { Text("Consultar horarios").font(.title.bold()) }
                       Picker("", selection: $byGroup) {
                           Text("Por grupo").tag(true)
                           Text("Por docente").tag(false)
@@ -1913,9 +2464,11 @@ jobs:
                               ForEach(store.data.teachers) { Text($0.name).tag(Optional($0.id)) }
                           }.frame(width: 320)
                       }
-                      ScheduleGrid(lessons: filtered, showGroup: !byGroup)
+                      ScheduleGrid(lessons: filtered, showGroup: !byGroup,
+                                   ownerKind: byGroup ? "G" : "T",
+                                   ownerKey: byGroup ? skey(group) : (teacher?.uuidString ?? ""))
                   }
-                  .padding(24)
+                  .padding(embedded ? 0 : 24)
               }
           }
 
@@ -1956,8 +2509,8 @@ jobs:
           <key>CFBundleName</key><string>Horarios de Emergencia</string>
           <key>CFBundleDisplayName</key><string>Horarios de Emergencia</string>
           <key>CFBundlePackageType</key><string>APPL</string>
-          <key>CFBundleShortVersionString</key><string>1.1</string>
-          <key>CFBundleVersion</key><string>2</string>
+          <key>CFBundleShortVersionString</key><string>1.2</string>
+          <key>CFBundleVersion</key><string>3</string>
           <key>LSMinimumSystemVersion</key><string>14.0</string>
           <key>NSPrincipalClass</key><string>NSApplication</string>
           <key>NSHighResolutionCapable</key><true/>
